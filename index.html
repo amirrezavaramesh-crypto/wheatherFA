@@ -873,5 +873,119 @@ window.addEventListener("hashchange",()=>{ if(location.hash==="#/forecast"&&!get
 renderAccuracy();
 { const u=getUser(); if(u) enterApp(u); else showLanding(); }
 </script>
+
+<!-- ================= WeatherFA AI chat (added) ================= -->
+<script>
+(() => {
+  const API_KEY = "AQ.Ab8RN6I_xBnf7usnMkZ9qZI0RnlQQKVwonIiFeVOjg7bCS-pHw";
+  // اگر مدل اول شلوغ بود، خودکار مدل بعدی امتحان می‌شود
+  const MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest"];
+  const SYSTEM = `تو دستیار هواشناسی سایت WeatherFA هستی. همیشه فارسی، کوتاه و روشن جواب بده.
+فقط بر اساس «داده‌های صفحه» که در پیام می‌آید پاسخ بده و اگر داده‌ای نبود یا هنوز بارگذاری نشده بود، همین را بگو و حدس نزن.
+تو جایگزین هشدار رسمی هواشناسی نیستی؛ در شرایط خطرناک جوی کاربر را به سازمان هواشناسی ارجاع بده.`;
+
+  const css = `
+  #wf-btn{position:fixed;bottom:18px;left:18px;z-index:2500;width:54px;height:54px;border-radius:50%;border:0;
+    background:var(--blue);color:#061526;font-size:24px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.35)}
+  #wf-box{position:fixed;bottom:84px;left:18px;z-index:2500;width:min(360px,calc(100vw - 36px));height:min(480px,70vh);
+    display:none;flex-direction:column;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:16px;
+    overflow:hidden;direction:rtl;font-family:var(--font);box-shadow:0 8px 28px rgba(0,0,0,.35)}
+  #wf-box.open{display:flex}
+  #wf-head{padding:10px 14px;background:var(--panel2);font-weight:700;display:flex;justify-content:space-between;align-items:center}
+  #wf-head span{cursor:pointer;color:var(--muted)}
+  #wf-msgs{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
+  .wf-m{padding:8px 12px;border-radius:12px;max-width:88%;white-space:pre-wrap;line-height:1.8;font-size:13.5px}
+  .wf-u{background:var(--blue);color:#061526;align-self:flex-start}
+  .wf-b{background:var(--panel2);border:1px solid var(--border);align-self:flex-end}
+  #wf-form{display:flex;gap:6px;padding:8px;border-top:1px solid var(--border)}
+  #wf-in{flex:1;min-width:0;padding:9px 11px;border-radius:10px;border:1px solid var(--border);background:var(--field);color:var(--text);outline:none}
+  #wf-in:focus{border-color:var(--blue)}
+  #wf-send{padding:0 14px;border:0;border-radius:10px;background:var(--blue);color:#061526;font-weight:700}
+  #wf-send:disabled{opacity:.5}`;
+  const st = document.createElement("style"); st.textContent = css; document.head.appendChild(st);
+
+  const btn = document.createElement("button"); btn.id = "wf-btn"; btn.textContent = "💬"; btn.title = "چت هواشناسی";
+  const box = document.createElement("div"); box.id = "wf-box";
+  box.innerHTML = `<div id="wf-head">دستیار هواشناسی <span id="wf-x">✕</span></div>
+    <div id="wf-msgs"></div>
+    <form id="wf-form"><input id="wf-in" placeholder="سؤالت را بنویس…" autocomplete="off"><button id="wf-send">ارسال</button></form>`;
+  document.body.append(btn, box);
+
+  // دکمه چت فقط داخل داشبورد دیده می‌شود، نه در صفحه معرفی
+  const appRoot = document.getElementById("appRoot");
+  const sync = () => {
+    const inApp = !appRoot.classList.contains("hide");
+    btn.style.display = inApp ? "" : "none";
+    if (!inApp) box.classList.remove("open");
+  };
+  sync();
+  new MutationObserver(sync).observe(appRoot, { attributes: true, attributeFilter: ["class"] });
+
+  const msgs = box.querySelector("#wf-msgs"), input = box.querySelector("#wf-in"), send = box.querySelector("#wf-send");
+  const history = [];
+
+  const add = (text, cls) => {
+    const d = document.createElement("div"); d.className = "wf-m " + cls; d.textContent = text;
+    msgs.appendChild(d); msgs.scrollTop = msgs.scrollHeight; return d;
+  };
+  add("سلام! درباره هوای مکان انتخاب‌شده هر چه می‌خواهی بپرس.", "wf-b");
+
+  btn.onclick = () => box.classList.toggle("open");
+  box.querySelector("#wf-x").onclick = () => box.classList.remove("open");
+
+  const pageData = () => {
+    const prevBox = box.style.display, prevBtn = btn.style.display;
+    box.style.display = "none"; btn.style.display = "none";
+    const t = appRoot.innerText.replace(/\n{2,}/g, "\n").slice(0, 12000);
+    box.style.display = prevBox; btn.style.display = prevBtn;
+    return t;
+  };
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  async function callGemini(contents, onRetry) {
+    let last = 0;
+    for (const model of MODELS) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        let r = null;
+        try {
+          r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-goog-api-key": API_KEY },
+            body: JSON.stringify({ system_instruction: { parts: [{ text: SYSTEM }] }, contents })
+          });
+        } catch (e) { r = null; }
+        if (r && r.ok) return await r.json();
+        const err = r ? await r.json().catch(() => ({})) : {};
+        last = r ? r.status : 0;
+        if (r && ![429, 500, 503, 504].includes(last)) throw new Error(err.error?.message || ("خطا " + last));
+        onRetry();
+        await sleep(1500 * (attempt + 1));
+      }
+    }
+    throw new Error(last === 429
+      ? "سقف درخواست رایگان پر شده؛ کمی بعد دوباره امتحان کن."
+      : "سرور Google الان شلوغ است (مشکل از سمت سایت نیست). چند دقیقه بعد دوباره امتحان کن.");
+  }
+
+  box.querySelector("#wf-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const q = input.value.trim(); if (!q) return;
+    input.value = ""; add(q, "wf-u"); send.disabled = true;
+    const wait = add("…", "wf-b");
+    history.push({ role: "user", parts: [{ text: q }] });
+    const contents = history.slice(-10).map((m, i, arr) =>
+      i === arr.length - 1 ? { role: "user", parts: [{ text: `داده‌های صفحه:\n${pageData()}\n\nسؤال کاربر: ${q}` }] } : m);
+    try {
+      const j = await callGemini(contents, () => { wait.textContent = "⏳ سرور شلوغ است، دوباره تلاش می‌کنم…"; });
+      const a = j.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "پاسخی دریافت نشد.";
+      history.push({ role: "model", parts: [{ text: a }] });
+      wait.textContent = a;
+    } catch (err) {
+      history.pop(); wait.textContent = "⚠️ " + err.message;
+    }
+    send.disabled = false; msgs.scrollTop = msgs.scrollHeight;
+  };
+})();
+</script>
 </body>
 </html>
